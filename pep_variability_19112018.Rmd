@@ -1,0 +1,1053 @@
+---
+title: "pep"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+### 1.0 Header
+```{r setup, include=FALSE}
+#packrat::init("IIV_disability_PEP")
+knitr::opts_chunk$set(echo = TRUE)
+options(descr.plot = FALSE, scipen = 50, digits = 3)
+
+# load some packages
+library(here)
+library(tidyverse)
+library(haven)
+library(descr)
+library(magrittr)
+
+# two central functions
+center<-function(var){
+  var=var-mean(var,na.rm=T)
+}
+
+vif.mer <- function (fit) {
+    ## adapted from rms::vif
+    
+    v <- vcov(fit)
+    nam <- names(fixef(fit))
+
+    ## exclude intercepts
+    ns <- sum(1 * (nam == "Intercept" | nam == "(Intercept)"))
+    if (ns > 0) {
+        v <- v[-(1:ns), -(1:ns), drop = FALSE]
+        nam <- nam[-(1:ns)]
+    }
+    
+    d <- diag(v)^0.5
+    v <- diag(solve(v/(d %o% d)))
+    names(v) <- nam
+    v
+}
+```
+
+
+
+### 1.1. Read & transform data
+```{r}
+pep1 <- read_sas("f2f_age_perinterval.sas7bdat")
+pep2 <- read_sas("month12itemdis_f2fcovars21112018.sas7bdat")
+
+# merge pep1 + pep2
+pep <- left_join(pep2, pep1, by = c("StudyID", "interval")) %>%
+       arrange(StudyID) 
+
+# focus on terminal decline, i.e. on deceased respondents only
+freq(pep$yearofdeath) # 17% of obs. missing year of death
+freq(pep$timetodeath) # 20.5%
+freq(pep$permrefuser) # 
+
+# Keep only those with valid timetodeath, aka deceased respondents
+pep %<>%
+  filter(!is.na(timetodeath)) 
+
+# calculate time-to-death and keep only last 10 years of life as follow-up
+pep %<>% 
+  mutate(
+    time.to.death = (intbloc - timetodeath)*-1,
+    time.to.death.yrs = time.to.death / 12) %>%
+  filter(time.to.death >= 0 & time.to.death <= 120)
+hist(pep$time.to.death)
+
+
+# recode categorical independent variables with simple coding
+pep %<>%
+  mutate(
+    non.white = case_when(
+      white == 1 ~ -0.5,
+      white == 0 ~ 0.5),
+    female = case_when(
+      female == 1 ~ 0.5,
+      female == 0 ~ -0.5),
+    married = case_when(
+      married == 1 ~ 0.5,
+      married == 0 ~ -0.5),
+    low.soc.supp = case_when(
+      low_social_support == 1 ~ 0.5,
+      low_social_support == 0 ~ -0.5),
+    alone = case_when(
+      LIVALNFU == 1 ~ 0.5, 
+      LIVALNFU == 0 ~ -0.5),
+    low.edu = case_when(
+      edu_lt12 == 1 ~ 0.5, 
+      edu_lt12 == 0 ~ -0.5),
+    low.mmse = case_when(
+      mmse_lt24 == 1 ~ 0.5,
+      mmse_lt24 == 0 ~ -0.5), 
+    frail = case_when(
+      frail_d == 1 ~ 0.5,
+      frail_d == 0 ~ -0.5)
+    )
+
+freq(pep$alone)
+# Some subsetting of cases (to 657)
+library(VIM)
+aggr_plot <- aggr(pep, col=c('navyblue','red'),
+                  numbers=TRUE, sortVars=TRUE,
+                  labels=names(pep),
+                  cex.axis=.7, gap=3,
+                  ylab=c("Histogram of missing data","Pattern"))
+
+pep %<>% 
+  filter(!is.na(female), 
+    !is.na(time.to.death.yrs),
+    !is.na(non.white),
+    !is.na(married),
+    !is.na(N_dis12),
+    !is.na(chronconFU),
+    !is.na(low.edu), 
+    !is.na(low.soc.supp), 
+    !is.na(low.mmse), 
+    !is.na(frail),
+    !is.na(alone))
+
+
+# ID-level datset
+pep.ID <- pep %>% 
+  count(StudyID) %>%
+  rename(num.int = n) %>% 
+  filter(num.int >= 6) %>% # keep only resp. with 6 or more obs.
+  arrange(StudyID) 
+
+freq(pep.ID$num.int) 
+
+# make new consistent id variable
+pep.ID %<>%
+  mutate(id = rownames(pep.ID),
+         id = as.numeric(id)) 
+
+# bind back and modify pep-observations-level df
+pep <- right_join(pep, pep.ID[,c("StudyID", "id", "num.int")], 
+                  by = "StudyID")
+
+
+## some re-naming and transforming ...
+pep %<>% 
+  mutate( edu.cont.c = center(edu_cont), 
+    num.int.c = center(num.int),
+    age.b = age_b, 
+    age.b.70 = age_b - 70, # center at age 70
+    age = age_fu,
+    age.c = center(age),
+    time.to.death.yrs.c = center(time.to.death.yrs), 
+    morbidity.c = center(chronconFU))
+
+
+# calculate age at death (=predictor for time-to-death analysis)
+pep.x <- pep %>%  
+  group_by(id) %>%
+  summarise(age.dead = max(age))
+pep <- left_join(pep, pep.x, by = "id")
+pep %<>%
+  mutate(age.dead.c = center(age.dead))
+hist(pep$age.dead)
+
+    
+# make line plots for the first 100 individuals
+pep.100 <- subset(pep, id <= 12)
+ggplot(pep.100, aes(x=time.to.death, y=N_dis12)) +
+    geom_smooth(se=T) + 
+  geom_line(size=0.25) +
+  facet_wrap(~id, nrow=3) +
+  scale_y_continuous("Disability", breaks = seq(0,12,2),
+                     limits=c(0,12)) +
+  scale_x_reverse("Months to death", breaks = seq(0,120,24),
+                  limits=c(120,0)) +
+  theme_bw(12) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(), 
+        legend.position = "top") +
+  ggsave("app_fig1_raw_loess.png", 
+         height = 6, width = 9, dpi=600)
+```
+
+
+### 1.2. Descriptives
+```{r}
+### a couple of descriptives
+pep %>%  
+  count(female) %>%
+  mutate(prop = prop.table(n))
+
+# N_dis12: Mean, median + SD by sex
+pep %>%  
+  group_by(female) %>%
+  summarise(mean = mean(N_dis12, na.rm=T), 
+         median = median(N_dis12, na.rm=T),
+         sd = sd(N_dis12, na.rm=T),
+         miss.n = sum(is.na(N_dis12)))
+
+# Baseline Age: Mean, min, max by sex
+pep %>%  
+  group_by(female) %>%
+  summarise(mean=mean(age_b), 
+         min=min(age_b),
+         max=max(age_b))
+hist(pep$age_b)
+
+
+
+# descriptives for number of monhtly interviews
+pep.ID %>%  
+  group_by(female) %>%
+  summarise(mean.num.month.int=mean(num.int),
+            sd.num.month.int=sd(num.int),
+         median.num.month.int=median(num.int),
+         min.num.month.int=min(num.int),
+         max.num.month.int=max(num.int))
+hist(pep.ID$num.int)
+
+```
+
+
+# 1.3. Calculate iSD and mssd (and bind back to pep.ID)
+```{r}
+library(psych)
+i.SD <- pep %>%  
+  group_by(StudyID) %>%
+  summarise(imean = mean(N_dis12, na.rm=T),
+            iSD = sd(N_dis12, na.rm=T),
+            rmssd = rmssd(N_dis12, na.rm=T),
+            min = min(N_dis12, na.rm=T), 
+            max = max(N_dis12, na.rm=T)) 
+pep.ID <- left_join(pep.ID, 
+                      i.SD[,c("StudyID", "iSD", "rmssd", "imean")], 
+                      by = "StudyID")
+
+pep.ID %>%  
+  summarise(mean.iSD = mean(iSD, na.rm=T),
+            median.iSD= median(iSD, na.rm=T),
+            mean.mssd = mean(rmssd, na.rm=T),
+            median.mssd= median(rmssd, na.rm=T))
+pep <- left_join(pep, pep.ID[,c("StudyID", "iSD", "rmssd", "imean")],
+                 by = "StudyID")
+
+# calculate correlation between iMEAN and iSD
+cor(pep.ID$imean, pep.ID$iSD, use="complete.obs")
+cor(pep.ID$imean, pep.ID$rmssd, use="complete.obs")
+
+
+# calculate baseline N_dis12
+pep.b <- subset(pep, intbloc == 1)
+pep.b$N_dis12.b <- pep.b$N_dis12
+pep.b <- pep.b[,c("StudyID", "N_dis12.b")]
+pep <- left_join(pep, pep.b, by = "StudyID")
+check <- pep[,c("StudyID", "intbloc", "N_dis12.b", "N_dis12")]
+freq(pep$N_dis12.b) # ~35% of respondents had 1+ disability at baseline
+```
+
+#  make 24months dataset (comparable to df in Lin 2015)
+```{r}
+freq(pep$time.to.death)
+pep24m <- subset(pep, time.to.death == 0 | time.to.death == 24 | 
+                   time.to.death == 48 |
+                   time.to.death == 72 | time.to.death == 96 | 
+                   time.to.death == 120)
+
+# make wide df by StudyID
+pep24m.w.ID <- pep24m %>% 
+  count(id, female, age.b) %>%
+  arrange(id) %>%
+  rename(num.int = n)
+
+# descriptives for number of monhtly interviews
+pep24m.w.ID %>%  
+  group_by(female) %>%
+  summarise(mean.num.biann.int=mean(num.int),
+            sd.num.biann.int=sd(num.int),
+         median.num.biann.int=median(num.int),
+         min.num.biann.int=min(num.int),
+         max.num.biann.int=max(num.int))
+
+# calculate iSD and mssd (and bind back to pep.ID)
+library(psych)
+i.SD24 <- pep24m %>%  
+  group_by(id) %>%
+  summarise(imean24 = mean(N_dis12, na.rm=T),
+            iSD24 = sd(N_dis12, na.rm=T),
+            rmssd24 = rmssd(N_dis12, na.rm=T),
+            min24 = min(N_dis12, na.rm=T), 
+            max24 = max(N_dis12, na.rm=T)) 
+pep.ID <- left_join(pep.ID, i.SD24, by = "StudyID")
+
+hist(pep.ID$iSD)
+hist(pep.ID$iSD24)
+hist(pep.ID$rmssd)
+hist(pep.ID$rmssd24)
+
+pep.ID %>%  
+  group_by(female) %>%
+  summarise(median.iSD = median(iSD, na.rm=T),
+            median.iSD24= median(iSD24, na.rm=T),
+            median.rmssd = median(rmssd, na.rm=T),
+            median.rmssd24= median(rmssd24, na.rm=T))
+```
+
+
+### 1.4. Unconditional model (lme4)
+```{r}
+library(lme4)
+### STEP 1: means-model
+m1.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c +  
+             age.b.70 + num.int.c + 
+             (1 + time.to.death.yrs.c | id), 
+           pep, REML=F)
+summary(m1.lmer)
+library(MuMIn)
+
+m2.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + I(time.to.death.yrs.c^2)  + 
+             age.b.70 + num.int.c + 
+             (1 + time.to.death.yrs.c | id), 
+           pep, REML=F)
+summary(m2.lmer)
+anova(m1.lmer, m2.lmer)
+
+m3.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + I(time.to.death.yrs.c^3) +
+             age.b.70 + num.int.c + 
+             (1 + time.to.death.yrs.c | id), 
+           pep, REML=F)
+summary(m3.lmer)
+anova(m2.lmer, m3.lmer)
+
+m4.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + I(time.to.death.yrs.c^3) +
+                  I(time.to.death.yrs.c^4) +
+             age.b.70 + num.int.c + 
+             (1 + time.to.death.yrs.c | id), 
+           pep, REML=F)
+summary(m4.lmer)
+anova(m3.lmer, m4.lmer)
+round(Weights(AICc(m1.lmer, m2.lmer, m3.lmer, m4.lmer)), 3) # will remain with
+# quartic model, because little substantial change after that but scaling
+# problems due to very small effects from quintic onwards. 
+# Also, splines show highly similar fit. 
+
+
+m5.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + I(time.to.death.yrs.c^3) +
+                  I(time.to.death.yrs.c^4) + I(time.to.death.yrs.c^5) +
+             age.b.70 + num.int.c + 
+             (1 + time.to.death.yrs.c | id), 
+           pep, REML=F)
+summary(m5.lmer)
+anova(m4.lmer, m5.lmer)
+
+library(splines)
+# with 3 knots
+m6.lmer <- lmer(N_dis12 ~  ns(time.to.death.yrs.c, df=5) +
+             age.b.70 + num.int.c + 
+             (1 + time.to.death.yrs.c | id), 
+           pep, REML=F)
+summary(m6.lmer)
+anova(m5.lmer, m6.lmer)
+round(Weights(AICc(m4.lmer, m5.lmer, m6.lmer)), 3) 
+
+m7.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + I(time.to.death.yrs.c^3) +
+                  I(time.to.death.yrs.c^4) + 
+             (1 + time.to.death.yrs.c + I(time.to.death.yrs.c^2)| id), 
+           pep, REML=F)
+summary(m7.lmer)
+anova(m5.lmer, m7.lmer)
+
+library(splines)
+# with 3 knots
+m8.lmer <- lmer(N_dis12 ~  ns(time.to.death.yrs.c, df=5) +
+             age.b.70 + num.int.c + 
+             (1 + ns(time.to.death.yrs.c, df=5) | id), 
+           pep, REML=F)
+summary(m8.lmer)
+anova(m6.lmer, m8.lmer)
+
+
+```
+
+#### Predictions for model comparison
+```{r}
+library(merTools)
+## plot results
+# linear
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m1.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+library(ggplot2)
+fig.linear <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+# quadratic
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m2.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+fig.quadr <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1), 
+                     limits=c(10,0)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+# cubic
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m3.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+fig.cubic <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1), 
+                     limits=c(10,0)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+# quartic
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m4.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+fig.quartic <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1), 
+                     limits=c(10,0)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+# quintic
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m5.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+fig.quintic <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1), 
+                     limits=c(10,0)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+# spline
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m6.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+fig.spline <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1), 
+                     limits=c(10,0)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+# quadratic slope (w. polynomial)
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m7.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+fig.quadr.slope <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+# slope with spline
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m8.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+fig.spline.slope <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+library(cowplot)
+plot_grid(fig.linear, fig.quadr, fig.cubic, fig.quartic, 
+          fig.quintic, fig.spline, fig.quadr.slope, fig.spline.slope,
+          ncol = 4, align = 'h', labels="auto") +
+  ggsave(filename="fig_fits.png", units="cm", width=20, height=12, dpi=600)
+```
+
+#### Comparing plots with and without residual variation
+```{r}
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m4.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "full",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+library(ggplot2)
+fig.quartic1 <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1), 
+                     limits=c(10,0)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+newData <- with(pep, expand.grid(time.to.death.yrs.c = 
+                                   unique(time.to.death.yrs.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 20))
+PI <- predictInterval(merMod = m4.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = T)
+newData <- cbind(newData, PI)
+newData$time.to.death.yrs <- 
+  newData$time.to.death.yrs.c  + mean(pep$time.to.death.yrs)
+
+library(ggplot2)
+fig.quartic2 <- ggplot(data = newData, 
+       aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("Pred. disability", breaks = seq(0,12,1)) +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1), 
+                     limits=c(10,0)) +
+  geom_hline(yintercept = 12, linetype=2, color="red")  +
+  theme_bw(10)
+
+library(cowplot)
+plot_grid(fig.quartic1, fig.quartic2,
+          ncol = 1, align = 'h', labels="auto") +
+  ggsave(filename="fig_residuals.png", units="cm", width=8, height=8, dpi=600)
+```
+
+
+### 1.5. Conditional model (lme4)
+```{r}
+# adding covariates
+m9.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + age.dead.c + 
+                  I(time.to.death.yrs.c^2)  + 
+                  I(time.to.death.yrs.c^3) +
+                  I(time.to.death.yrs.c^4) +
+             age.b.70 + female +  low.edu + non.white + 
+               married + low.soc.supp +
+                morbidity.c + low.mmse + 
+                num.int.c +
+             (1 + time.to.death.yrs.c | id), 
+           pep, REML=F)
+summary(m9.lmer)
+library(MuMIn)
+r.squaredGLMM(m9.lmer)
+qqnorm(resid(m9.lmer))
+qqline(resid(m9.lmer))
+
+library(stargazer)
+stargazer(m9.lmer, title=c("Disability trajectories"), 
+          ci=T, single.row=T, align=T, digits=2, 
+          intercept.top=T, intercept.bottom = F, no.space=T)
+
+
+```
+
+
+
+### 1.6. Modell disability IIV (lme4)
+```{r}
+pep$res <- resid(m9.lmer) 
+hist(pep$res)
+pep$res.a <- abs(pep$res) #take absolute values
+
+
+# calculate geometric mean (acts as baseline for interpretation of %
+# effects from logged outcome)
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+gm_mean(pep$res.a)
+pep$res.l <- log(pep$res.a) # log due to skew
+par(mfrow=c(1,3))
+hist(pep$res)
+hist(pep$res.a)
+hist(pep$res.l)
+
+# Using linear model and log transformation beforehand
+m10.lmer <- lmer(res.l ~ time.to.death.yrs.c +
+             (1 | id), 
+           pep, REML=F)
+summary(m10.lmer)
+
+m11.lmer <- lmer(res.l ~ time.to.death.yrs.c + I(time.to.death.yrs.c^2) + 
+             (1 | id), 
+           pep, REML=F)
+summary(m11.lmer)
+anova(m10.lmer, m11.lmer)
+
+m12.lmer <- lmer(res.l ~ time.to.death.yrs.c + I(time.to.death.yrs.c^2) + 
+             I(time.to.death.yrs.c^3) + 
+             (1 | id), 
+           pep, REML=F)
+summary(m12.lmer)
+anova(m11.lmer, m12.lmer) # no improvement: quadratic effect it is!
+
+# INterpretation: LOG SCALE!
+install.packages("broom.mixed")
+library(broom.mixed)
+tidy(m8.lmer,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+
+# plot model 8
+newdata1 <- with(pep, expand.grid(time.to.death.yrs.c =
+                                    unique(time.to.death.yrs.c),
+                                      id = 1))
+library(merTools)
+PI <- predictInterval(merMod = m11.lmer, newdata = newdata1,
+                      level = 0.95, n.sims = 1000, 
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newdata1 <- cbind(newdata1, PI)
+newdata1$time.to.death.yrs <- newdata1$time.to.death.yrs.c +
+  mean(pep$time.to.death.yrs)
+library(ggplot2)
+ggplot(data = newdata1, 
+               aes(x = time.to.death.yrs, y = fit)) +
+  geom_line(aes(y = upr, x = time.to.death.yrs),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = time.to.death.yrs), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = time.to.death.yrs), size = 1) + 
+  scale_y_continuous("log(Disability IIV)") +
+  scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1),
+                  limits=c(10,0))
+
+exp(0.25)
+```
+
+```{r}
+# Adding covariates
+m13.lmer <- lmer(res.l ~ imean + time.to.death.yrs.c +
+                  I(time.to.death.yrs.c^2) + 
+             age.dead + female +  low.edu + non.white + 
+                num.int.c +
+             (1 | id), 
+           pep, REML=F)
+summary(m13.lmer)
+library(MuMIn)
+r.squaredGLMM(m13.lmer)
+confint(m13.lmer, level=0.95, method="Wald")
+
+names(pep)
+
+```
+
+### 1.7. Modell autocorrelation in disability (lme4)
+```{r}
+pep.lag <- pep %>% # make lag variable of resid
+    group_by(id) %>% 
+  mutate(lag1=lag(res)) %>%
+  filter(!is.na(lag1))
+
+## difference between t_1 und t_-1 = Measure for autocorrelation (and iSD # rspectively their interaction!), see Wang et al. 2013, p.6-5. 
+# Only difference to MSSD: here, we are using it as an observation-level
+# figure (just the difference, no squaring, no summing) and not as the sum of squared differences (=MSSD). Wobei, Squaring hat den Sinn das größere Abweichungungen stärker gewichtet werden ...
+pep.lag$autcorr.diff <- pep.lag$res - pep.lag$lag1
+pep.lag$autcorr.diff.abs <- abs(pep.lag$autcorr.diff)
+pep.lag$autcorr.diff.abs.log <- log(pep.lag$autcorr.diff.abs)
+
+# descriptives
+par(mfrow=c(1,3))
+hist(pep.lag$autcorr.diff)
+hist(pep.lag$autcorr.diff.abs)
+hist(pep.lag$autcorr.diff.abs.log)
+
+
+check <- pep.lag[,c("id", "intbloc", "N_dis12", "res", 
+                    "lag1", "autcorr.diff", "autcorr.diff.abs")]
+
+# Adding covariates
+mx.lmer <- lmer(autcorr.diff.abs.log ~ imean + time.to.death.yrs.c +
+                  I(time.to.death.yrs.c^2) + 
+             age.dead + female +  low.edu + non.white + 
+                num.int.c +
+             (1 | id), 
+           pep.lag, REML=F)
+summary(mx.lmer)
+library(MuMIn)
+r.squaredGLMM(mx.lmer)
+confint(mx.lmer, level=0.95, method="Wald")
+```
+
+
+# Alternativ: model residuals with quasibinomial
+```{r}
+#negative binomial from GLMMadaptive
+library(GLMMadaptive)
+m8.alt <- mixed_model(res.a ~   time.to.death.yrs.c +
+                            I(time.to.death.yrs.c^2) + 
+                            age.b.70 + 
+                            num.int.c, 
+                         random = ~ 1| id, 
+                         family=negative.binomial(), data = pep)
+summary(m8.alt) 
+# need to plot it ...
+
+m10.alt <- mixed_model(res.a ~   imean + time.to.death.yrs.c +
+                            I(time.to.death.yrs.c^2) + 
+                            age.b.70 + female +  low.edu + non.white + 
+                            married + low.soc.supp +
+                            morbidity.c +  low.mmse + 
+                            num.int.c, 
+                         random = ~ 1| id, 
+                         family=negative.binomial(), data = pep)
+summary(m10.alt) 
+```
+
+### 1.5. Export summary tables
+```{r}
+library(stargazer)
+stargazer(m1.lmer, ci=T, single.row=T)
+```
+
+
+### 1.5. Model data with brms
+```{r}
+library(brms)
+m1.brms <- brm(N_dis12 ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + 
+                  I(time.to.death.yrs.c^3) +
+                  I(time.to.death.yrs.c^4) +
+                  age.b.70 + female +  low.edu + non.white + 
+                  married + low.soc.supp +
+                  morbidity.c + low.mmse + 
+                  num.int.c +
+                  (1 + time.to.death.yrs.c|ID|id), 
+                  family = gaussian(), 
+                  chains=4, warmup=2000, iter=12000,
+                  data = pep, core=4, thin=2, 
+                  control = list(adapt_delta = 0.95))
+summary(m1.brms)
+
+m2.brms <- brm(bf(N_dis12 ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + 
+                  I(time.to.death.yrs.c^3) +
+                  I(time.to.death.yrs.c^4) +
+                  age.b.70 + female +  low.edu + non.white + 
+                  married + low.soc.supp +
+                  morbidity.c + low.mmse + 
+                  num.int.c +
+                  (1 + time.to.death.yrs.c|ID|id), 
+                  
+                  sigma ~  1 + (1|ID|id)),
+             
+                  family = gaussian(), 
+                  chains=4, warmup=2000, iter=12000,
+                  data = pep, core=4, thin=2, 
+                  control = list(adapt_delta = 0.95))
+summary(m2.brms)
+saveRDS(m2.brms, file="m2_brms.rds")
+plot(m2.brms)
+
+
+
+m3.brms <- brm(bf(N_dis12 ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + 
+                  I(time.to.death.yrs.c^3) +
+                  I(time.to.death.yrs.c^4) +
+                  age.dead.c + female +  low.edu + non.white + 
+                  married + low.soc.supp +
+                  morbidity.c + low.mmse + 
+                  num.int.c +
+                  (1 + time.to.death.yrs.c|ID|id), 
+                  
+                  sigma ~  time.to.death.yrs.c + 
+                  I(time.to.death.yrs.c^2)  + 
+                  age.dead.c + female +  low.edu + non.white + 
+                  num.int.c +
+                  (1|ID|id)),
+             
+                  family = gaussian(), 
+                  chains=4, warmup=2000, iter=12000,
+                  data = pep, core=4, thin=2, 
+                  control = list(adapt_delta = 0.99))
+summary(m3.brms)
+plot(m3.brms)
+saveRDS(m3.brms, file="m3_brms.rds")
+```
+
+
+```{r}
+### CORE PROBLEM: ADLS and linear model dont go well together ...
+# other distributions?
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+pep %>%  
+  summarise(mean=mean(N_dis12),
+            var=var(N_dis12),
+            mode=Mode(N_dis12),
+            min=min(N_dis12), 
+            max=max(N_dis12))
+hist(pep$N_dis12)
+freq(pep$N_dis12)
+13.3/3.23
+# i.e.: clearly skewed, low mean, high variance (=overdispersed). Only positive numbers and integers. This rules linear model and ... possion model out. 
+hist(log(pep$N_dis12)) # log transformation does not normalise things (enough) 
+# either, thus, a log transformation and a linear model wont do. SEE: 
+#https://www.theanalysisfactor.com/count-data-considered-continuous/
+
+# i.e. what remains: poisson, negative binomial, binomial, beta-binomial ...
+# beta-binomial machen wohl bbmle als auch GLMMadaptive (unter custom models) ...
+
+## Wichtiger Hinweis aus Atkins 2012 (supplements):
+# Predictions from a Poisson model need to include both fixed and 
+# random effects => weil die random intercepts durchs exponieren (=link funct)
+# nicht mehr bei 0 sind und dadurch nicht weggelassen werden können (
+# population-average (marginal) vs. individual specific (conditional) estimates. 
+# diskutiert in Breslow & Clayton 1993. 
+
+
+
+library(lme4)
+m2.lmer <- lmer(N_dis12 ~  year.c + I(year.c^2) +  
+             age.b.70 + num.int.c + 
+             (1 + year.c | id), 
+           pep, REML=F)
+summary(m2.lmer)
+plot(m2.lmer)
+library(merTools)
+# plot results
+#newData <- draw(m2.lmer, type = "average")
+#newData <- wiggle(newData, varlist = "year.c", 
+                  #valueslist = list(unique(pep$year.c)))
+# = kürzere Formulierung, aber mit weniger Eingriffsmöglichkeiten
+newData <- with(pep, expand.grid(year.c = unique(year.c), 
+                                  age.b.70 = mean(age.b.70),
+                                 num.int.c = mean(num.int.c),
+                                 id = 5))
+
+PI <- predictInterval(merMod = m2.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+library(ggplot2)
+ggplot(data = newData, 
+       aes(x = year.c, y = fit)) +
+  geom_line(aes(y = upr, x = year.c),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = year.c), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = year.c), size = 1) 
+
+
+
+
+## Vergleich von linear model mit negative binomial
+m2.nb <- glmer.nb(N_dis12 ~  year.c + 
+                  age.b.70 + female +
+                  edu.cont.c + non.white + married + 
+                  morbidity.c + obese + num.int.c + 
+                  (1 + year.c | id), 
+                pep, REML=F)
+summary(m2.nb)
+plot(m2.nb)
+anova(m2.lmer, m2.nb)
+
+
+describe(pep$year.c)
+# negative binomial from GLMMadaptive
+library(GLMMadaptive)
+m2.poiss.riz <- mixed_model(N_dis12 ~  year.c + age.b.70 + female +
+                              edu.cont.c + non.white + married + 
+                              morbidity.c + obese + num.int.c, 
+                         random = ~ 1 + year.c | id, 
+                         family=poisson(), data = pep)
+summary(m2.poiss.riz)
+anova(m2.lmer, m2.poiss.riz)
+exp
+
+
+fm1 <- mixed_model(fixed = y ~ year * group, random = ~ 1 | id, data = DF,
+                   family = binomial())
+
+# catterpillar plot
+plotREsim(REsim(m2.lmer, n.sims = 100), stat = 'median', sd = TRUE)
+
+library(merTools)
+# plot results
+newData <- draw(m2.lmer, type = "average")
+newData <- wiggle(newData, varlist = "year.c", 
+                  valueslist = list(unique(pep$year.c)))
+newData <- wiggle(newData, varlist = "age.b.cat3", 
+                  valueslist = list(unique(pep$age.b.cat3)))
+
+PI <- predictInterval(merMod = m2.lmer, newdata = newData,
+                      level = 0.95, n.sims = 1000, which = "fixed",
+                      stat = "median", type="linear.prediction",
+                      include.resid.var = F)
+newData <- cbind(newData, PI)
+library(ggplot2)
+ggplot(data = newData, 
+       aes(x = year.c, y = fit)) +
+  geom_line(aes(y = upr, x = year.c),  
+            size = 0.3, alpha=0.5, linetype=2) + 
+  geom_line(aes(y = lwr, x = year.c), 
+            size = 0.3, alpha=0.5, linetype=2) +
+  geom_line(aes(y = fit, x = year.c), size = 1) +
+  facet_wrap(~age.b.cat3)
+
+
+
+
+
