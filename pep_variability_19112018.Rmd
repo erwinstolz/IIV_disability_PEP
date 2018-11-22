@@ -59,6 +59,19 @@ freq(pep$yearofdeath) # 17% of obs. missing year of death
 freq(pep$timetodeath) # 20.5%
 freq(pep$permrefuser) # 
 
+# ID-level datset: how many respondents have died during follow-up (20yrs)
+pep %>% 
+  count(StudyID, timetodeath) %>%
+  rename(num.int = n) %>% 
+  arrange(StudyID) %>%
+  mutate(dead = case_when(
+    !is.na(timetodeath) ~ 1,
+    is.na(timetodeath) ~ 0)) %>%
+  count(dead) %>%
+  mutate(freq = n / sum(n))
+
+
+
 # Keep only those with valid timetodeath, aka deceased respondents
 pep %<>%
   filter(!is.na(timetodeath)) 
@@ -104,11 +117,11 @@ pep %<>%
 freq(pep$alone)
 # Some subsetting of cases (to 657)
 library(VIM)
-aggr_plot <- aggr(pep, col=c('navyblue','red'),
-                  numbers=TRUE, sortVars=TRUE,
-                  labels=names(pep),
-                  cex.axis=.7, gap=3,
-                  ylab=c("Histogram of missing data","Pattern"))
+# aggr_plot <- aggr(pep, col=c('navyblue','red'),
+#                   numbers=TRUE, sortVars=TRUE,
+#                   labels=names(pep),
+#                   cex.axis=.7, gap=3,
+#                   ylab=c("Histogram of missing data","Pattern"))
 
 pep %<>% 
   filter(!is.na(female), 
@@ -165,10 +178,12 @@ pep %<>%
 hist(pep$age.dead)
 
     
-# make line plots for the first 100 individuals
+# make line plots for the first 12 individuals
+library(ggformula)
 pep.100 <- subset(pep, id <= 12)
 ggplot(pep.100, aes(x=time.to.death, y=N_dis12)) +
     geom_smooth(se=T) + 
+    geom_spline(all.knots=F, nknots=3, color="red", size=1) + 
   geom_line(size=0.25) +
   facet_wrap(~id, nrow=3) +
   scale_y_continuous("Disability", breaks = seq(0,12,2),
@@ -182,6 +197,9 @@ ggplot(pep.100, aes(x=time.to.death, y=N_dis12)) +
         legend.position = "top") +
   ggsave("app_fig1_raw_loess.png", 
          height = 6, width = 9, dpi=600)
+
+?smooth.spline()
+
 ```
 
 
@@ -312,14 +330,13 @@ pep.ID %>%
 library(lme4)
 ### STEP 1: means-model
 m1.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c +  
-             age.b.70 + num.int.c + 
+              num.int.c + 
              (1 + time.to.death.yrs.c | id), 
            pep, REML=F)
 summary(m1.lmer)
-library(MuMIn)
 
 m2.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + I(time.to.death.yrs.c^2)  + 
-             age.b.70 + num.int.c + 
+              num.int.c + 
              (1 + time.to.death.yrs.c | id), 
            pep, REML=F)
 summary(m2.lmer)
@@ -327,7 +344,7 @@ anova(m1.lmer, m2.lmer)
 
 m3.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + 
                   I(time.to.death.yrs.c^2)  + I(time.to.death.yrs.c^3) +
-             age.b.70 + num.int.c + 
+              num.int.c + 
              (1 + time.to.death.yrs.c | id), 
            pep, REML=F)
 summary(m3.lmer)
@@ -336,12 +353,13 @@ anova(m2.lmer, m3.lmer)
 m4.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + 
                   I(time.to.death.yrs.c^2)  + I(time.to.death.yrs.c^3) +
                   I(time.to.death.yrs.c^4) +
-             age.b.70 + num.int.c + 
+              num.int.c + 
              (1 + time.to.death.yrs.c | id), 
            pep, REML=F)
 summary(m4.lmer)
 anova(m3.lmer, m4.lmer)
-round(Weights(AICc(m1.lmer, m2.lmer, m3.lmer, m4.lmer)), 3) # will remain with
+library(MuMIn)
+round(Weights(AICc(m1.lmer, m2.lmer, m3.lmer, m4.lmer)), 3) # keep 
 # quartic model, because little substantial change after that but scaling
 # problems due to very small effects from quintic onwards. 
 # Also, splines show highly similar fit. 
@@ -350,7 +368,7 @@ round(Weights(AICc(m1.lmer, m2.lmer, m3.lmer, m4.lmer)), 3) # will remain with
 m5.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + 
                   I(time.to.death.yrs.c^2)  + I(time.to.death.yrs.c^3) +
                   I(time.to.death.yrs.c^4) + I(time.to.death.yrs.c^5) +
-             age.b.70 + num.int.c + 
+              num.int.c + 
              (1 + time.to.death.yrs.c | id), 
            pep, REML=F)
 summary(m5.lmer)
@@ -358,8 +376,8 @@ anova(m4.lmer, m5.lmer)
 
 library(splines)
 # with 3 knots
-m6.lmer <- lmer(N_dis12 ~  ns(time.to.death.yrs.c, df=5) +
-             age.b.70 + num.int.c + 
+m6.lmer <- lmer(N_dis12 ~  ns(time.to.death.yrs.c, df=3) +
+              num.int.c + 
              (1 + time.to.death.yrs.c | id), 
            pep, REML=F)
 summary(m6.lmer)
@@ -376,24 +394,22 @@ anova(m5.lmer, m7.lmer)
 
 library(splines)
 # with 3 knots
-m8.lmer <- lmer(N_dis12 ~  ns(time.to.death.yrs.c, df=5) +
-             age.b.70 + num.int.c + 
-             (1 + ns(time.to.death.yrs.c, df=5) | id), 
+m8.lmer <- lmer(N_dis12 ~  ns(time.to.death.yrs.c, df=2) +
+              num.int.c + 
+             (1 + ns(time.to.death.yrs.c, df=2) | id), 
            pep, REML=F)
 summary(m8.lmer)
 anova(m6.lmer, m8.lmer)
-
-
+coef(m8.lmer)
 ```
 
-#### Predictions for model comparison
+#### 1.4.1 Predictions for model comparison
 ```{r}
 library(merTools)
 ## plot results
 # linear
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m1.lmer, newdata = newData,
@@ -420,7 +436,6 @@ fig.linear <- ggplot(data = newData,
 # quadratic
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m2.lmer, newdata = newData,
@@ -447,7 +462,6 @@ fig.quadr <- ggplot(data = newData,
 # cubic
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m3.lmer, newdata = newData,
@@ -474,7 +488,6 @@ fig.cubic <- ggplot(data = newData,
 # quartic
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m4.lmer, newdata = newData,
@@ -501,7 +514,6 @@ fig.quartic <- ggplot(data = newData,
 # quintic
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m5.lmer, newdata = newData,
@@ -528,7 +540,6 @@ fig.quintic <- ggplot(data = newData,
 # spline
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m6.lmer, newdata = newData,
@@ -555,7 +566,6 @@ fig.spline <- ggplot(data = newData,
 # quadratic slope (w. polynomial)
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m7.lmer, newdata = newData,
@@ -581,11 +591,10 @@ fig.quadr.slope <- ggplot(data = newData,
 # slope with spline
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
-                                 id = 20))
+                                 id = unique(id)))
 PI <- predictInterval(merMod = m8.lmer, newdata = newData,
-                      level = 0.95, n.sims = 1000, which = "fixed",
+                      level = 0.95, n.sims = 1000, which = "all",
                       stat = "median", type="linear.prediction",
                       include.resid.var = F)
 newData <- cbind(newData, PI)
@@ -611,11 +620,11 @@ plot_grid(fig.linear, fig.quadr, fig.cubic, fig.quartic,
   ggsave(filename="fig_fits.png", units="cm", width=20, height=12, dpi=600)
 ```
 
+
 #### Comparing plots with and without residual variation
 ```{r}
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m4.lmer, newdata = newData,
@@ -642,7 +651,6 @@ fig.quartic1 <- ggplot(data = newData,
 
 newData <- with(pep, expand.grid(time.to.death.yrs.c = 
                                    unique(time.to.death.yrs.c), 
-                                  age.b.70 = mean(age.b.70),
                                  num.int.c = mean(num.int.c),
                                  id = 20))
 PI <- predictInterval(merMod = m4.lmer, newdata = newData,
@@ -677,24 +685,24 @@ plot_grid(fig.quartic1, fig.quartic2,
 ### 1.5. Conditional model (lme4)
 ```{r}
 # adding covariates
-m9.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c + age.dead.c + 
+m9.lmer <- lmer(N_dis12 ~  time.to.death.yrs.c +
                   I(time.to.death.yrs.c^2)  + 
                   I(time.to.death.yrs.c^3) +
                   I(time.to.death.yrs.c^4) +
-             age.b.70 + female +  low.edu + non.white + 
-               married + low.soc.supp +
-                morbidity.c + low.mmse + 
+             age.dead.c + female +  low.edu + non.white + 
+                morbidity.c + frail + low.mmse + 
                 num.int.c +
              (1 + time.to.death.yrs.c | id), 
            pep, REML=F)
 summary(m9.lmer)
 library(MuMIn)
 r.squaredGLMM(m9.lmer)
+vif.mer(m9.lmer)
 qqnorm(resid(m9.lmer))
 qqline(resid(m9.lmer))
 
 library(stargazer)
-stargazer(m9.lmer, title=c("Disability trajectories"), 
+stargazer(m6.lmer, title=c("Disability trajectories"), 
           ci=T, single.row=T, align=T, digits=2, 
           intercept.top=T, intercept.bottom = F, no.space=T)
 
@@ -752,7 +760,7 @@ newdata1 <- with(pep, expand.grid(time.to.death.yrs.c =
                                       id = 1))
 library(merTools)
 PI <- predictInterval(merMod = m11.lmer, newdata = newdata1,
-                      level = 0.95, n.sims = 1000, 
+                      level = 0.95, n.sims = 1000, which = "fixed",
                       stat = "median", type="linear.prediction",
                       include.resid.var = F)
 newdata1 <- cbind(newdata1, PI)
@@ -770,7 +778,8 @@ ggplot(data = newdata1,
   scale_x_reverse("Time to death (yrs)", breaks=seq(0,10,1),
                   limits=c(10,0))
 
-exp(0.25)
+exp(-0.4)
+exp(0.2)
 ```
 
 ```{r}
